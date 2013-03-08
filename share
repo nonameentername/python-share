@@ -105,7 +105,6 @@ def myhandler(interface, protocol, name, stype, domain, flags):
             pass
 
     if protocol == avahi.PROTO_INET and name == service_name:
-        #import ipdb; ipdb.set_trace()
         server.ResolveService(interface, protocol, name, stype,
             domain, avahi.PROTO_UNSPEC, dbus.UInt32(0),
             reply_handler=service_resolved, error_handler=print_error)
@@ -151,7 +150,7 @@ class ZeroconfService:
         self.group.Reset()
 
 
-def files():
+def list_files():
     result = []
     for (dirpath, dirname, filenames) in os.walk('.'):
         for filename in filenames:
@@ -169,17 +168,18 @@ Setup a VERY simple file server
     sock = context.socket(zmq.REP)
     sock.bind('tcp://*:%s' % service_port)
 
+    files = list_files()
     # Start the server loop
     while True:
         # Recieve the location of the file to serve
         msg = sock.recv()
 
         if msg == '*':
-            sock.send(files())
+            sock.send(files)
             continue
 
-        # Verify that the file is available
-        if not os.path.isfile(msg):
+        # Verify that the file is available and in current directory
+        if not os.path.isfile(msg) or msg not in files:
             sock.send('')
             continue
         # Open the file for reading
