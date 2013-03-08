@@ -1,0 +1,231 @@
+#!/usr/bin/env python
+
+#sudo apt-get install python-avahi python-zmq
+
+import argparse
+from dbus import DBusException
+from dbus.mainloop.glib import DBusGMainLoop
+import avahi
+import dbus, gobject, avahi
+import os
+import sys
+import zmq
+
+service_name = "share_files"
+service_port = 4545
+TYPE = "_http._tcp"
+
+ip = None
+port = None
+done = False
+
+def get_files():
+    global ip
+    global port
+
+    context = zmq.Context()
+    socket = context.socket(zmq.REQ)
+
+    socket.connect('tcp://%s:%s' % (ip, port))
+    # send the desired file to the server
+    socket.send('*')
+
+    files = ''
+    while True:
+        # Start grabing data
+        data = socket.recv()
+        # Write the chunk to the file
+        files += data
+        if not socket.getsockopt(zmq.RCVMORE):
+            # If there is not more data to send, then break
+            break
+
+    return files.splitlines()
+
+
+def get_file(path):
+    '''
+A VERY simple client to get files from the zeromq VERY simple file server
+'''
+    global ip
+    global port
+    # Open up the file we are going to write to
+
+    directory = os.path.dirname(path)
+
+    if directory:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
+    dest = open(path, 'w+')
+    # Set up the zeromq context and socket
+    context = zmq.Context()
+    socket = context.socket(zmq.REQ)
+
+    socket.connect('tcp://%s:%s' % (ip, port))
+    # send the desired file to the server
+    socket.send(path)
+
+    while True:
+        # Start grabing data
+        data = socket.recv()
+        # Write the chunk to the file
+        dest.write(data)
+        if not socket.getsockopt(zmq.RCVMORE):
+            # If there is not more data to send, then break
+            break
+
+#if __name__ == '__main__':
+
+def service_resolved(*args):
+    global ip
+    global port
+    global done
+    #print 'service resolved'
+    ip = args[7]
+    port = args[8]
+
+    if not done:
+        for filename in get_files():
+            done = True
+            print 'downloading file: %s' % filename
+            get_file(filename)
+        sys.exit()
+
+
+def print_error(*args):
+    print 'error_handler'
+    print args[0]
+
+def myhandler(interface, protocol, name, stype, domain, flags):
+    #print "Found service '%s' type '%s' domain '%s' " % (name, stype, domain)
+
+    if flags & avahi.LOOKUP_RESULT_LOCAL:
+            # local service, skip
+            pass
+
+    if protocol == avahi.PROTO_INET and name == service_name:
+        #import ipdb; ipdb.set_trace()
+        server.ResolveService(interface, protocol, name, stype,
+            domain, avahi.PROTO_UNSPEC, dbus.UInt32(0),
+            reply_handler=service_resolved, error_handler=print_error)
+
+
+
+class ZeroconfService:
+    """A simple class to publish a network service with zeroconf using
+    avahi.
+
+    """
+
+    def __init__(self, name, port, stype="_http._tcp",
+                 domain="", host="", text=""):
+        self.name = name
+        self.stype = stype
+        self.domain = domain
+        self.host = host
+        self.port = port
+        self.text = text
+
+    def publish(self):
+        bus = dbus.SystemBus()
+        server = dbus.Interface(
+                         bus.get_object(
+                                 avahi.DBUS_NAME,
+                                 avahi.DBUS_PATH_SERVER),
+                        avahi.DBUS_INTERFACE_SERVER)
+
+        g = dbus.Interface(
+                    bus.get_object(avahi.DBUS_NAME,
+                                   server.EntryGroupNew()),
+                    avahi.DBUS_INTERFACE_ENTRY_GROUP)
+
+        g.AddService(avahi.IF_UNSPEC, avahi.PROTO_UNSPEC,dbus.UInt32(0),
+                     self.name, self.stype, self.domain, self.host,
+                     dbus.UInt16(self.port), self.text)
+
+        g.Commit()
+        self.group = g
+
+    def unpublish(self):
+        self.group.Reset()
+
+
+def files():
+    result = []
+    for (dirpath, dirname, filenames) in os.walk('.'):
+        for filename in filenames:
+            result.append(os.path.join(dirpath, filename))
+
+    result.append('')
+    return '\n'.join(result)
+
+def server():
+    '''
+Setup a VERY simple file server
+'''
+    # Set up the zeromq context and REP socket
+    context = zmq.Context(1)
+    sock = context.socket(zmq.REP)
+    sock.bind('tcp://*:%s' % service_port)
+
+    # Start the server loop
+    while True:
+        # Recieve the location of the file to serve
+        msg = sock.recv()
+
+        if msg == '*':
+            sock.send(files())
+            continue
+
+        # Verify that the file is available
+        if not os.path.isfile(msg):
+            sock.send('')
+            continue
+        # Open the file for reading
+        fn = open(msg, 'rb')
+        stream = True
+        # Start reading in the file
+        while stream:
+            # Read the file bit by bit
+            stream = fn.read(128)
+            if stream:
+                # If the stream has more to send then send more
+                sock.send(stream, zmq.SNDMORE)
+            else:
+                # Finish it off
+                sock.send(stream)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Share Files')
+    parser.add_argument('-d', '--download', action='store_true')
+    parser.add_argument('-s', '--server', action='store_true')
+
+    if len(sys.argv) > 1:
+        args = vars(parser.parse_args())
+    else:
+        sys.argv.append('-h')
+        parser.parse_args()
+
+    if args['server']:
+        service = ZeroconfService(name=service_name, port=service_port)
+        service.publish()
+        server()
+        service.unpublish()
+
+    elif args['download']:
+        loop = DBusGMainLoop()
+
+        bus = dbus.SystemBus(mainloop=loop)
+
+        server = dbus.Interface( bus.get_object(avahi.DBUS_NAME, '/'),
+                'org.freedesktop.Avahi.Server')
+
+        sbrowser = dbus.Interface(bus.get_object(avahi.DBUS_NAME,
+                server.ServiceBrowserNew(avahi.IF_UNSPEC,
+                    avahi.PROTO_UNSPEC, TYPE, 'local', dbus.UInt32(0))),
+                avahi.DBUS_INTERFACE_SERVICE_BROWSER)
+
+        sbrowser.connect_to_signal("ItemNew", myhandler)
+
+        gobject.MainLoop().run()
