@@ -159,7 +159,7 @@ def list_files():
     result.append('')
     return '\n'.join(result)
 
-def server():
+def server(files=None):
     '''
 Setup a VERY simple file server
 '''
@@ -168,7 +168,8 @@ Setup a VERY simple file server
     sock = context.socket(zmq.REP)
     sock.bind('tcp://*:%s' % service_port)
 
-    files = list_files()
+    if not files:
+        files = list_files()
     # Start the server loop
     while True:
         # Recieve the location of the file to serve
@@ -198,22 +199,12 @@ Setup a VERY simple file server
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Share Files')
-    parser.add_argument('-d', '--download', action='store_true')
-    parser.add_argument('-s', '--server', action='store_true')
+    parser.add_argument('-d', '--download', action='store_true', help='downloads files from server')
+    parser.add_argument('-f', '--files', metavar='filename', type=str, nargs='*')
 
-    if len(sys.argv) > 1:
-        args = vars(parser.parse_args())
-    else:
-        sys.argv.append('-h')
-        parser.parse_args()
+    args = vars(parser.parse_args())
 
-    if args['server']:
-        service = ZeroconfService(name=service_name, port=service_port)
-        service.publish()
-        server()
-        service.unpublish()
-
-    elif args['download']:
+    if args['download']:
         loop = DBusGMainLoop()
 
         bus = dbus.SystemBus(mainloop=loop)
@@ -229,3 +220,15 @@ if __name__ == '__main__':
         sbrowser.connect_to_signal("ItemNew", myhandler)
 
         gobject.MainLoop().run()
+
+    service = ZeroconfService(name=service_name, port=service_port)
+    service.publish()
+
+    files = None
+    if args['files']:
+        files = args['files']
+        files.append('')
+        files = '\n'.join(files)
+
+    server(files)
+    service.unpublish()
