@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 
-#sudo apt-get install python-avahi python-zmq
+#pip install pybonjour pyzmq
 
 import argparse
-from dbus import DBusException
-from dbus.mainloop.glib import DBusGMainLoop
-import avahi
-import dbus, gobject, avahi
 import os
+import pybonjour
+import select
+import sys
 import sys
 import zmq
 
@@ -18,6 +17,109 @@ TYPE = "_http._tcp"
 ip = None
 port = None
 done = False
+
+debug = False
+
+
+class ZeroconfServer:
+
+    def __init__(self, name, port, regtype='_http._tcp'):
+        self.name = name
+        self.port = port
+        self.regtype = regtype
+        self.published = False
+
+    def register_callback(self, sdRef, flags, errorCode, name, regtype, domain):
+        if errorCode == pybonjour.kDNSServiceErr_NoError:
+            if debug:
+                print 'Registered service:'
+                print '  name    =', name
+                print '  regtype =', regtype
+                print '  domain  =', domain
+            self.published = True
+        else:
+            self.published = False
+
+    def publish(self):
+        self.sdRef = pybonjour.DNSServiceRegister(name = self.name,
+                regtype = self.regtype,
+                port = self.port,
+                callBack = self.register_callback)
+
+        while not self.published:
+            ready = select.select([self.sdRef], [], [])
+            if self.sdRef in ready[0]:
+                pybonjour.DNSServiceProcessResult(self.sdRef)
+
+    def unpublish(self):
+        if self.published and self.sdRef:
+            self.sdRef.close()
+
+
+class ZeroconfClient:
+
+    def __init__(self, name, port, regtype='_http._tcp', timeout=5):
+        self.name = name
+        self.port = port
+        self.regtype = regtype
+        self.timeout = timeout
+        self.resolved = False
+
+    def resolve_callback(self, sdRef, flags, interfaceIndex, errorCode, fullname,
+                         hosttarget, hostport, txtRecord):
+        if errorCode == pybonjour.kDNSServiceErr_NoError:
+            if debug:
+                print 'Resolved service:'
+                print '  fullname   =', fullname
+                print '  hosttarget =', hosttarget
+                print '  port       =', hostport
+            self.resolved = True
+            self.hosttarget = hosttarget
+            self.hostport = hostport
+
+    def browse_callback(self, sdRef, flags, interfaceIndex, errorCode, serviceName,
+                        regtype, replyDomain):
+        if errorCode != pybonjour.kDNSServiceErr_NoError:
+            return
+
+        if not (flags & pybonjour.kDNSServiceFlagsAdd):
+            if debug:
+                print 'Service removed'
+            return
+
+        if debug:
+            print 'Service added; resolving'
+
+        resolve_sdRef = pybonjour.DNSServiceResolve(0,
+                interfaceIndex,
+                serviceName,
+                regtype,
+                replyDomain,
+                self.resolve_callback)
+
+        try:
+            while not self.resolved:
+                ready = select.select([resolve_sdRef], [], [], self.timeout)
+                if resolve_sdRef not in ready[0]:
+                    if debug:
+                        print 'Resolve timed out'
+                    break
+                pybonjour.DNSServiceProcessResult(resolve_sdRef)
+        finally:
+            resolve_sdRef.close()
+
+
+    def resolve(self):
+        browse_sdRef = pybonjour.DNSServiceBrowse(regtype = self.regtype,
+                callBack = self.browse_callback)
+
+        while not self.resolved:
+            ready = select.select([browse_sdRef], [], [])
+            if browse_sdRef in ready[0]:
+                pybonjour.DNSServiceProcessResult(browse_sdRef)
+
+        return self.hosttarget, self.hostport
+
 
 def get_files():
     global ip
@@ -75,80 +177,6 @@ A VERY simple client to get files from the zeromq VERY simple file server
             # If there is not more data to send, then break
             break
 
-#if __name__ == '__main__':
-
-def service_resolved(*args):
-    global ip
-    global port
-    global done
-    #print 'service resolved'
-    ip = args[7]
-    port = args[8]
-
-    if not done:
-        for filename in get_files():
-            done = True
-            print 'downloading file: %s' % filename
-            get_file(filename)
-        sys.exit()
-
-
-def print_error(*args):
-    print 'error_handler'
-    print args[0]
-
-def myhandler(interface, protocol, name, stype, domain, flags):
-    #print "Found service '%s' type '%s' domain '%s' " % (name, stype, domain)
-
-    if flags & avahi.LOOKUP_RESULT_LOCAL:
-            # local service, skip
-            pass
-
-    if protocol == avahi.PROTO_INET and name == service_name:
-        server.ResolveService(interface, protocol, name, stype,
-            domain, avahi.PROTO_UNSPEC, dbus.UInt32(0),
-            reply_handler=service_resolved, error_handler=print_error)
-
-
-
-class ZeroconfService:
-    """A simple class to publish a network service with zeroconf using
-    avahi.
-
-    """
-
-    def __init__(self, name, port, stype="_http._tcp",
-                 domain="", host="", text=""):
-        self.name = name
-        self.stype = stype
-        self.domain = domain
-        self.host = host
-        self.port = port
-        self.text = text
-
-    def publish(self):
-        bus = dbus.SystemBus()
-        server = dbus.Interface(
-                         bus.get_object(
-                                 avahi.DBUS_NAME,
-                                 avahi.DBUS_PATH_SERVER),
-                        avahi.DBUS_INTERFACE_SERVER)
-
-        g = dbus.Interface(
-                    bus.get_object(avahi.DBUS_NAME,
-                                   server.EntryGroupNew()),
-                    avahi.DBUS_INTERFACE_ENTRY_GROUP)
-
-        g.AddService(avahi.IF_UNSPEC, avahi.PROTO_UNSPEC,dbus.UInt32(0),
-                     self.name, self.stype, self.domain, self.host,
-                     dbus.UInt16(self.port), self.text)
-
-        g.Commit()
-        self.group = g
-
-    def unpublish(self):
-        self.group.Reset()
-
 
 def list_files():
     result = []
@@ -205,23 +233,17 @@ if __name__ == '__main__':
     args = vars(parser.parse_args())
 
     if args['download']:
-        loop = DBusGMainLoop()
+        client = ZeroconfClient(service_name, service_port)
+        ip, port = client.resolve()
 
-        bus = dbus.SystemBus(mainloop=loop)
+        if not done:
+            for filename in get_files():
+                done = True
+                print 'downloading file: %s' % filename
+                get_file(filename)
+            sys.exit()
 
-        server = dbus.Interface( bus.get_object(avahi.DBUS_NAME, '/'),
-                'org.freedesktop.Avahi.Server')
-
-        sbrowser = dbus.Interface(bus.get_object(avahi.DBUS_NAME,
-                server.ServiceBrowserNew(avahi.IF_UNSPEC,
-                    avahi.PROTO_UNSPEC, TYPE, 'local', dbus.UInt32(0))),
-                avahi.DBUS_INTERFACE_SERVICE_BROWSER)
-
-        sbrowser.connect_to_signal("ItemNew", myhandler)
-
-        gobject.MainLoop().run()
-
-    service = ZeroconfService(name=service_name, port=service_port)
+    service = ZeroconfServer(name=service_name, port=service_port)
     service.publish()
 
     files = None
