@@ -10,9 +10,8 @@ import sys
 import sys
 import zmq
 
-service_name = "share_files"
 service_port = 4545
-TYPE = "_http._tcp"
+service_type = "_http._tcp"
 
 ip = None
 port = None
@@ -23,7 +22,7 @@ debug = False
 
 class ZeroconfServer:
 
-    def __init__(self, name, port, regtype='_http._tcp'):
+    def __init__(self, name, port, regtype=service_type):
         self.name = name
         self.port = port
         self.regtype = regtype
@@ -58,7 +57,7 @@ class ZeroconfServer:
 
 class ZeroconfClient:
 
-    def __init__(self, name, port, regtype='_http._tcp', timeout=5):
+    def __init__(self, name, port, regtype=service_type, timeout=5):
         self.name = name
         self.port = port
         self.regtype = regtype
@@ -74,7 +73,7 @@ class ZeroconfClient:
                 print '  hosttarget =', hosttarget
                 print '  port       =', hostport
 
-            if fullname.startswith(service_name):
+            if fullname.startswith(self.name):
                 self.resolved = True
                 self.hosttarget = hosttarget
                 self.hostport = hostport
@@ -208,10 +207,13 @@ Setup a VERY simple file server
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Share Files')
+    parser.add_argument('-n', '--name', default='share', help='downloads files from server')
     parser.add_argument('-d', '--download', action='store_true', help='downloads files from server')
     parser.add_argument('-f', '--files', metavar='filename', type=str, nargs='*')
 
     args = vars(parser.parse_args())
+
+    service_name = args['name']
 
     if args['download']:
         client = ZeroconfClient(service_name, service_port)
@@ -224,14 +226,18 @@ if __name__ == '__main__':
                 get_file(filename)
             sys.exit()
 
-    service = ZeroconfServer(name=service_name, port=service_port)
-    service.publish()
+    try:
+        service = ZeroconfServer(name=service_name, port=service_port)
+        service.publish()
 
-    files = None
-    if args['files']:
-        files = args['files']
-        files.append('')
-        files = '\n'.join(files)
+        files = None
+        if args['files']:
+            files = args['files']
+            files.append('')
+            files = '\n'.join(files)
 
-    server(files)
+        server(files)
+    except KeyboardInterrupt:
+        pass
+
     service.unpublish()
