@@ -73,28 +73,18 @@ class ZeroconfClient:
                 print '  fullname   =', fullname
                 print '  hosttarget =', hosttarget
                 print '  port       =', hostport
-            self.resolved = True
-            self.hosttarget = hosttarget
-            self.hostport = hostport
 
-    def browse_callback(self, sdRef, flags, interfaceIndex, errorCode, serviceName,
-                        regtype, replyDomain):
-        if errorCode != pybonjour.kDNSServiceErr_NoError:
-            return
+            if fullname.startswith(service_name):
+                self.resolved = True
+                self.hosttarget = hosttarget
+                self.hostport = hostport
 
-        if not (flags & pybonjour.kDNSServiceFlagsAdd):
-            if debug:
-                print 'Service removed'
-            return
-
-        if debug:
-            print 'Service added; resolving'
-
+    def resolve(self):
         resolve_sdRef = pybonjour.DNSServiceResolve(0,
-                interfaceIndex,
-                serviceName,
-                regtype,
-                replyDomain,
+                0,
+                self.name,
+                self.regtype,
+                'local.',
                 self.resolve_callback)
 
         try:
@@ -108,15 +98,6 @@ class ZeroconfClient:
         finally:
             resolve_sdRef.close()
 
-
-    def resolve(self):
-        browse_sdRef = pybonjour.DNSServiceBrowse(regtype = self.regtype,
-                callBack = self.browse_callback)
-
-        while not self.resolved:
-            ready = select.select([browse_sdRef], [], [])
-            if browse_sdRef in ready[0]:
-                pybonjour.DNSServiceProcessResult(browse_sdRef)
 
         return self.hosttarget, self.hostport
 
